@@ -87,6 +87,9 @@ class Absori(Function1D, metaclass=FunctionMeta):
 
     def _setup(self):
 
+        self._fixed_units = (
+            astropy_units.keV, astropy_units.dimensionless_unscaled)
+
         # the elements in this model
         self._absori_elements = ["H", "He", "C", "N", "O",
                                  "Ne", "Mg", "Si", "S", "Fe"]
