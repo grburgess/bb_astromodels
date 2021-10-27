@@ -735,3 +735,47 @@ class Integrate_Absori(Function1D, metaclass=FunctionMeta):
                 sigma[iZ][iIon][k] = sigmadata[i][k] / 6.6e-27
 
         return ion, sigma, atomicnumber, energy
+
+    def _load_abundance(self, model="angr"):
+        """
+        Load the base abundance for the given model.
+        Only needed in the precalc.
+        """
+        with open(
+            _get_data_file_path(os.path.join("abundance", "abundances.dat"))
+        ) as f:
+            rows = f.readlines()
+            ele = np.array(rows[0].split(" "), dtype=str)
+            ele = ele[ele != ""][1:]
+            # get rid of \n at the end
+            ele[-1] = ele[-1][:2]
+            vals = np.zeros((7, len(ele)))
+            keys = []
+            for i, row in enumerate(rows[1:8]):
+                l = np.array(row.split(" "), dtype=str)
+                l = l[l != ""]
+                # get rid of \n at the end
+                if l[-1][-2:] == "\n":
+                    l[-1] = l[-1][:2]
+                if l[-1] == "\n":
+                    l = l[:-1]
+                vals[i] = np.array(l[1:], dtype=float)
+                keys.append(l[0][:-1])
+            keys = np.array(keys)
+        vals_all = np.zeros(len(self._absori_elements))
+        for i, element in enumerate(self._absori_elements):
+            assert (
+                element in ele
+            ), f"{element} not a valid element. Valid elements: {ele}"
+
+            idx = np.argwhere(ele == element)[0, 0]
+
+            assert (
+                model in keys
+            ), f"{model} not a valid name. Valid names: {keys}"
+
+            idy = np.argwhere(keys == model)[0, 0]
+
+            vals_all[i] = vals[idy, idx]
+
+        return vals_all
