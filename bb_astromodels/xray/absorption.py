@@ -379,7 +379,7 @@ class Absori(Function1D, metaclass=FunctionMeta):
         return num
 
 
-class Integrate_Absori(Absori, metaclass=FunctionMeta):
+class Integrate_Absori(Function1D, metaclass=FunctionMeta):
     r"""
     description :
         Integrate ionized medium absorption (absori implementation from xspec) over redshift
@@ -566,3 +566,172 @@ class Integrate_Absori(Absori, metaclass=FunctionMeta):
             zz += zsam
 
         return np.exp(-taus)
+
+    def _calc_opacity(self, e, temp, xi, gamma, abundance, fe_abundance):
+        """
+        Calculate the opacity for the given parameters and energies
+        """
+
+        # calc the ionizing spectrum
+        spec = self._calc_ion_spec(gamma)
+
+        # get the num matrix
+        num = self._calc_num(spec, temp, xi)
+
+        # get abundance TODO check this
+        ab = np.copy(self._abundance)
+        ab[2:-1] *= 10 ** abundance  # for elements>He
+        ab[-1] *= 10 ** fe_abundance  # for iron
+
+        # weight num by abundance
+        num *= ab
+        # interpolate sigma for the given e values
+        sigma = self._interpolate_sigma(e)
+
+        # multiply together and sum
+        return np.sum(num * sigma, axis=(1, 2)) * 6.6e-5
+
+    # @cache_array_method(maxsize=1)
+    def _interpolate_sigma(self, ekev):
+        """
+        Interpolate sigma for the e values
+        """
+        e = 1000 * ekev
+
+        sigma = np.zeros((len(e), self._sigma.shape[1], self._sigma.shape[2]))
+
+        # we have to split in three parts. e>max(base_energy)
+        # and e<min(base_energy) and rest
+        mask1 = e > self._base_energy[-1]
+        mask2 = e < self._base_energy[0]
+
+        mask3 = (~mask1) * (~mask2)
+        # for mask true use simple interpolation between
+        # the base energy values
+
+        sigma[mask3] = self._interp_sigma(e[mask3])
+
+        # for mask false extend the sigma at the highest energy base value with
+        # a powerlaw with slope -3
+
+        sigma[mask1] = self._sigma[720]
+        sigma[mask1] *= np.expand_dims(
+            np.power((e[mask1] / self._base_energy[-1]), -3.0), axis=(1, 2)
+        )
+
+        sigma[mask2] = self._sigma[0]
+
+        return sigma
+
+    @lru_cache(maxsize=1)
+    def _calc_ion_spec(self, gamma):
+        """
+        Calc the F(E)*deltaE at the grid energies of the base energies.
+        """
+        return calc_ion_spec_numba(gamma, self._base_energy, self._deltaE)
+
+    # @cache_array_method(maxsize=1)
+    def _calc_num(self, spec, temp, xi):
+        """
+        Calc the num matrix. I don't really understand most of this. I copied the code
+        from xspec and vectrorized most of the calc for speed. Tested to give the same result
+        like xspec.
+        """
+        # transform temp to units of 10**4 K
+        t4 = 0.0001 * temp
+        tfact = 1.033e-3 / np.sqrt(t4)
+
+        # log of xi
+        if xi <= 0:
+            xil = -100.0
+        else:
+            xil = np.log(xi)
+
+        num = np.zeros((self._max_atomicnumber, len(self._atomicnumber)))
+
+        # loop over all types of atoms in the model
+        e1 = np.exp(-self._ion[:, :, 4] / t4)
+        e2 = np.exp(-self._ion[:, :, 6] / t4)
+        arec = self._ion[:, :, 1] * np.power(
+            t4, -self._ion[:, :, 2]
+        ) + self._ion[:, :, 3] * np.power(t4, -1.5) * e1 * (
+            1.0 + self._ion[:, :, 5] * e2
+        )
+        z2 = self._atomicnumber ** 2
+        y = 15.8 * z2 / t4
+        arec2 = tfact * z2 * (1.735 + np.log(y) + 1 / (6.0 * y))
+        arec[self._mask_2] = arec2
+
+        intgral = np.sum(self._sigma.T * spec, axis=2)
+
+        ratio = np.zeros_like(arec)
+
+        ratio[arec != 0] = np.log(
+            3.2749e-6 * intgral[arec != 0] / arec[arec != 0]
+        )
+        # ratio = np.log(3.2749e-6*intgral/arec)
+        # ratio[arec == 0] = 0
+        ratcumsum = np.cumsum(ratio, axis=1)
+
+        mul = ratcumsum + (np.arange(1, self._max_atomicnumber + 1)) * xil
+        mul[~self._mask_valid] = -(10 ** 99)
+        mult = np.max(mul, axis=1)
+        mul = (mul.T - mult).T
+        emul = np.exp(mul)
+        emul[~self._mask_valid] = 0
+
+        s = np.sum(emul, axis=1)
+
+        s += np.exp(-mult)
+        num[0] = -mult - np.log(s)
+        for j in range(1, 26):
+            num[j] = num[j - 1] + ratio[:, j - 1] + xil
+
+        num = np.exp(num)
+        num[~self._mask_valid.T] = 0
+        return num
+
+    def _load_sigma(self):
+        """
+        Load the base data for absori.
+        Not the most efficient way but only needed
+        in the precalc.
+        """
+        ion = np.zeros((10, 26, 10))
+        sigma = np.zeros((10, 26, 721))
+        atomicnumber = np.empty(10, dtype=int)
+
+        with fits.open(
+            _get_data_file_path(os.path.join("ionized", "mansig.fits"))
+        ) as f:
+            znumber = f["SIGMAS"].data["Z"]
+            ionnumber = f["SIGMAS"].data["ION"]
+            sigmadata = f["SIGMAS"].data["SIGMA"]
+            iondata = f["SIGMAS"].data["IONDATA"]
+
+            energy = f["ENERGIES"].data["ENERGY"]
+
+        currentZ = -1
+        iZ = -1
+        iIon = -1
+        for i in range(len(znumber)):
+            if znumber[i] != currentZ:
+                iZ += 1
+                atomicnumber[iZ] = znumber[i]
+                currentZ = znumber[i]
+                iIon = -1
+            iIon += 1
+            for k in range(10):
+                ion[iZ, iIon, k] = iondata[i][k]
+
+            # change units of coef
+
+            ion[iZ][iIon][1] *= 1.0e10
+            ion[iZ][iIon][3] *= 1.0e04
+            ion[iZ][iIon][4] *= 1.0e-04
+            ion[iZ][iIon][6] *= 1.0e-04
+
+            for k in range(721):
+                sigma[iZ][iIon][k] = sigmadata[i][k] / 6.6e-27
+
+        return ion, sigma, atomicnumber, energy
