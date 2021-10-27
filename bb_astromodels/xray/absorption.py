@@ -623,7 +623,7 @@ class Integrate_Absori(Function1D, metaclass=FunctionMeta):
 
         return sigma
 
-    #    @lru_cache(maxsize=1)
+    @lru_cache(maxsize=1)
     def _calc_ion_spec(self, gamma):
         """
         Calc the F(E)*deltaE at the grid energies of the base energies.
